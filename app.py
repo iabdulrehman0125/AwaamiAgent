@@ -2,9 +2,12 @@
 import os
 import json
 import re
+import io
 import streamlit as st
 from groq import Groq
-
+from pypdf import PdfReader
+from PIL import Image
+import pytesseract
 
 # ============================================================
 # CONFIGURATION
@@ -58,12 +61,100 @@ if not api_key:
 
 client = Groq(api_key=api_key)
 
+# ============================================================
+# DOCUMENT EXTRACTION
+# ============================================================
 
+def extract_pdf_text(file_bytes):
+    """Extract selectable text from a PDF."""
+    
+    reader = PdfReader(io.BytesIO(file_bytes))
+
+    pages = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        pages.append(text)
+
+    full_text = "\n\n".join(pages).strip()
+
+    return {
+        "text": full_text,
+        "page_count": len(reader.pages),
+        "extraction_method": "pdf_text"
+    }
+
+
+def extract_image_text(file_bytes):
+    """Extract text from an image using OCR."""
+    
+    image = Image.open(io.BytesIO(file_bytes))
+
+    text = pytesseract.image_to_string(
+        image,
+        lang="eng"
+    )
+
+    return {
+        "text": text.strip(),
+        "page_count": 1,
+        "extraction_method": "ocr"
+    }
+
+
+def process_uploaded_document(uploaded_file):
+    """Process an uploaded PDF or image."""
+
+    if uploaded_file is None:
+        return None
+
+    file_bytes = uploaded_file.getvalue()
+
+    metadata = {
+        "filename": uploaded_file.name,
+        "file_type": uploaded_file.type,
+        "file_size_bytes": len(file_bytes)
+    }
+
+    try:
+
+        if uploaded_file.type == "application/pdf":
+
+            result = extract_pdf_text(file_bytes)
+
+        elif uploaded_file.type in [
+            "image/png",
+            "image/jpeg"
+        ]:
+
+            result = extract_image_text(file_bytes)
+
+        else:
+            raise ValueError("Unsupported file type.")
+
+        metadata.update({
+            "page_count": result["page_count"],
+            "extraction_method": result["extraction_method"]
+        })
+
+        return {
+            "metadata": metadata,
+            "text": result["text"]
+        }
+
+    except Exception as e:
+
+        raise ValueError(
+            f"Could not process the uploaded document: {str(e)}"
+        )
 # ============================================================
 # AI ANALYSIS
 # ============================================================
 
-def analyze_civic_problem(problem, language):
+def analyze_civic_problem(
+    problem,
+    language,
+    document_context=None
+):
     """
     Analyze a user's civic problem and return structured JSON.
     """
@@ -74,6 +165,21 @@ def analyze_civic_problem(problem, language):
         else "Respond in natural, simple Urdu. Keep important English terms "
              "in parentheses when useful."
     )
+    if document_context:
+
+        document_text = document_context.get("text", "")
+
+        document_metadata = json.dumps(
+            document_context.get("metadata", {}),
+            ensure_ascii=False,
+            indent=2
+        )
+
+    else:
+
+        document_text = "No document uploaded."
+
+        document_metadata = "{}"
 
     prompt = f"""
 You are AwaamiAgent, an AI civic assistance system.
@@ -117,7 +223,13 @@ Return ONLY valid JSON using exactly these six fields:
 Keep the response concise.
 
 User's civic problem:
-{problem}
+{problem if problem.strip() else "No problem description provided."}
+
+Uploaded document metadata:
+{document_metadata}
+
+Uploaded document text:
+{document_text}
 """
 
     response = client.chat.completions.create(
@@ -304,6 +416,12 @@ problem = st.text_area(
     height=160
 )
 
+uploaded_file = st.file_uploader(
+    "Upload a civic/government document (optional)",
+    type=["pdf", "png", "jpg", "jpeg"],
+    help="Upload a PDF, scanned document, bill, notice, or image."
+)
+
 language = st.selectbox(
     "Response language",
     ["English", "Urdu"]
@@ -316,19 +434,28 @@ language = st.selectbox(
 
 if st.button("🔎 Analyze Problem", type="primary"):
 
-    if not problem.strip():
-        st.warning("Please describe your civic problem first.")
+    if not problem.strip() and uploaded_file is None:
+        st.warning(
+            "Please describe your civic problem or upload a document."
+        )
     else:
-
         st.session_state.analysis = None
         st.session_state.complaint = None
 
         with st.spinner("AwaamiAgent is analyzing your problem..."):
-
             try:
+                document_context = None
+
+                if uploaded_file is not None:
+                    with st.spinner("Reading uploaded document..."):
+                        document_context = process_uploaded_document(
+                            uploaded_file
+                        )
+
                 result = analyze_civic_problem(
                     problem.strip(),
-                    language
+                    language,
+                    document_context
                 )
 
                 st.session_state.analysis = result
